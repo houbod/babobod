@@ -51,7 +51,7 @@ api_secret = os.getenv("API_SECRET")
 # ═══════════════════════════════════════════════════════════════════════════
 IS_PAPER_TRADING = True  # SET True = Paper Trading (Simulasi Tanpa Order Asli) | False = Live Execution via API
 
-USE_DEMO_ACCOUNT = True  # Jika IS_PAPER_TRADING = False: True = Testnet Demo | False = Real Mainnet
+USE_DEMO_ACCOUNT = False  # Jika IS_PAPER_TRADING = False: True = Testnet Demo | False = Real Mainnet
 
 if USE_DEMO_ACCOUNT:
     client = Client(api_key, api_secret, testnet=True)
