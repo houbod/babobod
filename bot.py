@@ -1,16 +1,18 @@
 """
-Bot Scalping v22.2 DEMO — INSTITUTIONAL QUANT ENGINE (Binance Futures)
+Bot Scalping v23.0 — PAPER TRADING & LIVE/DEMO EXECUTION ENGINE
 ====================================================================
-INVERTED DIRECTION LOCK & STRICT SIDEWAY FILTER:
-- Volume Filter: Wajib Volume Ratio (VR) >= 0.85 & ADX >= 20 (Cegah Entry Sideway)
-- Direction Lock Mode:
+FEATURES:
+- Switchable Mode: Toggle IS_PAPER_TRADING = True (Paper Trading / Virtual) / False (Live API).
+- Switchable Real API: Toggle USE_DEMO_ACCOUNT = True (Testnet) / False (Real Mainnet).
+- Inverted Direction Lock Engine:
   * Loss di NORMAL (LONG)  -> Mode INVERTED DIPAKSA HANYA SHORT sampai Loss.
   * Loss di NORMAL (SHORT) -> Mode INVERTED DIPAKSA HANYA LONG sampai Loss.
-  * Loss di INVERTED       -> Kembali ke NORMAL (Arah Bebas Sesuai Sinyal).
-- Same-Side Retry Guard: Jika mau entry di arah yang sama persis setelah loss, wajib meloloskan Filter Ketat.
+  * Loss di INVERTED        -> Kembali ke NORMAL (Arah Bebas Sesuai Sinyal).
+- Same-Side Retry Guard & Strict Volume/ADX Filter.
 - Real-time Metrics & Timestamp WITA (Makassar UTC+8).
 - MAX_POSITIONS = 1 | ORDER_USDT = 3.0 USDT.
-- Dynamic Weekly Profit Target & Auto Reset (Senin 00:00 WITA).
+- Dynamic Weekly Cumulative Profit Target (Auto Reset on Monday WITA & Auto ActivePos Cleanup).
+- Instant Warm-up Engine (Fix Cold-Start Delay).
 """
 
 import sys
@@ -44,14 +46,19 @@ load_dotenv()
 api_key = os.getenv("API_KEY")
 api_secret = os.getenv("API_SECRET")
 
-try:
-    client = Client(api_key, api_secret)
-except Exception:
-    client = Client(api_key, api_secret)
+# ═══════════════════════════════════════════════════════════════════════════
+#  ACCOUNT & SIMULATION CONFIGURATION
+# ═══════════════════════════════════════════════════════════════════════════
+IS_PAPER_TRADING = True  # SET True = Paper Trading (Simulasi Tanpa Order Asli) | False = Live Execution via API
 
-PAPER_TRADING = True
-BINANCE_DEMO = False
-client.FUTURES_URL = "https://fapi.binance.com/fapi"
+USE_DEMO_ACCOUNT = True  # Jika IS_PAPER_TRADING = False: True = Testnet Demo | False = Real Mainnet
+
+if USE_DEMO_ACCOUNT:
+    client = Client(api_key, api_secret, testnet=True)
+    client.FUTURES_URL = "https://testnet.binancefuture.com/fapi"
+else:
+    client = Client(api_key, api_secret)
+    client.FUTURES_URL = "https://fapi.binance.com/fapi"
 
 WS_MAX_QUEUE_SIZE = 2000
 DEPTH_SOCKET_CHUNK = 8
@@ -84,7 +91,7 @@ twm = _create_twm()
 # ═══════════════════════════════════════════════════════════════════════════
 
 LEVERAGE      = 20
-ORDER_USDT    = 3.0
+ORDER_USDT    = 6.0
 MAX_POSITIONS = 1
 
 # Strict Volume & Sideway Filters
@@ -107,8 +114,8 @@ REST_418_COOLDOWN = 900.0
 REST_RETRIES = 2
 
 # Scoring & Risk
-MIN_SCORE                  = 58   # Skor minimal sinyal normal
-SAME_SIDE_EXTRA_SCORE      = 12   # Tambahan skor minimal jika mau entry di arah yang baru saja rugi (58+12 = 70)
+MIN_SCORE                  = 58   
+SAME_SIDE_EXTRA_SCORE      = 12   
 ATR_TP_RESTORED_MULTIPLIER = 3.5
 ATR_SL_RESTORED_MULTIPLIER = 1.8
 
@@ -116,7 +123,7 @@ MIN_TP_PCT        = 0.025
 MAX_TP_PCT        = 0.035
 MIN_SL_PCT        = 0.015
 MAX_SL_PCT        = 0.025
-MAX_HOLD_SECONDS  = 6120   # Batas maksimal tahan posisi
+MAX_HOLD_SECONDS  = 6120   # Batas maksimal tahan posisi (1 jam 42 menit)
 
 # Institutional Order Book
 WALL_RATIO_THRESHOLD  = 2.5
@@ -139,34 +146,6 @@ CONSEC_PAUSE = 10
 
 LEARNING_WINDOW       = 200
 MIN_TRADES_FOR_WEIGHT = 20
-
-# ═══════════════════════════════════════════════════════════════════════════
-#  WEEKLY TARGET MANAGEMENT
-# ═══════════════════════════════════════════════════════════════════════════
-_weekly_pnl = 0.0
-_current_week_num = None
-
-def get_current_week_key() -> Tuple[int, int]:
-    """Mengembalikan pasangan (Tahun, Nomor_Minggu) dalam waktu WITA."""
-    now_wita = datetime.now(tz=WITA_TZ)
-    return now_wita.isocalendar()[:2]
-
-def check_weekly_reset():
-    """Mereset akumulasi profit mingguan otomatis saat memasuki minggu baru (Senin WITA)."""
-    global _weekly_pnl, _current_week_num
-    this_week = get_current_week_key()
-    if _current_week_num is None:
-        _current_week_num = this_week
-    elif this_week != _current_week_num:
-        _weekly_pnl = 0.0
-        _current_week_num = this_week
-        print(f"\n  🔄 [WEEKLY RESET] Minggu baru dimulai! Akumulasi profit mingguan di-reset ke 0.0 USDT.")
-
-def is_weekly_target_reached() -> Tuple[bool, float, float]:
-    """Mengecek apakah target profit mingguan (sebesar ORDER_USDT) sudah tercapai."""
-    check_weekly_reset()
-    target = float(ORDER_USDT)
-    return (_weekly_pnl >= target), _weekly_pnl, target
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  SYMBOLS
@@ -415,8 +394,8 @@ class DynamicRiskManager:
 class MarketRegime:
     REGIME_TRENDING_BULL = "TRENDING_BULL"
     REGIME_TRENDING_BEAR = "TRENDING_BEAR"
-    REGIME_RANGE         = "RANGE"
-    REGIME_VOLATILE      = "VOLATILE"
+    REGIME_RANGE          = "RANGE"
+    REGIME_VOLATILE       = "VOLATILE"
     REGIME_EXHAUSTION    = "EXHAUSTION"
 
     @staticmethod
@@ -429,8 +408,8 @@ class MarketRegime:
         adx = row["adx"]
         bull_stack = close > e5 > e9 > e21 > e50
         bear_stack = close < e5 < e9 < e21 < e50
-        mild_bull  = close > e9 > e21
-        mild_bear  = close < e9 < e21
+        mild_bull   = close > e9 > e21
+        mild_bear   = close < e9 < e21
         strong_trend      = adx > 25
         very_strong_trend = adx > 35
         atr_expand   = (atr / atr_prev) > 1.2 if atr_prev > 0 else False
@@ -678,9 +657,36 @@ _stats = {
     "hist": deque(maxlen=200), "start": time.time(),
 }
 
+# ═══════════════════════════════════════════════════════════════════════════
+#  WEEKLY TARGET PROFIT TRACKER & LOGIC (FIXED ACTIVEPOS CLEAR)
+# ═══════════════════════════════════════════════════════════════════════════
+_weekly_pnl = 0.0
+_current_iso_year, _current_iso_week, _ = datetime.now(tz=WITA_TZ).isocalendar()
+
+def weekly_target_check() -> Tuple[bool, str]:
+    global _weekly_pnl, _current_iso_year, _current_iso_week
+    now_dt = datetime.now(tz=WITA_TZ)
+    iso_year, iso_week, _ = now_dt.isocalendar()
+
+    # Reset Otomatis di Hari Senin (Pergantian Minggu ISO)
+    if (iso_year, iso_week) != (_current_iso_year, _current_iso_week):
+        print(f"\n  🔄 [WEEKLY RESET] Berganti Minggu ({_current_iso_week} -> {iso_week}). Reset Kumulatif PnL Mingguan dari {_weekly_pnl:+.4f}U ke $0.00.")
+        _weekly_pnl = 0.0
+        _current_iso_year = iso_year
+        _current_iso_week = iso_week
+
+    target = float(ORDER_USDT)
+    if _weekly_pnl >= target:
+        # PEMBERSIHAN OTOMATIS: Bersihkan live_positions lokal agar ActivePos kembali ke (0/1)
+        with _lock:
+            if live_positions:
+                live_positions.clear()
+        return True, f"Target Mingguan Tercapai (+{_weekly_pnl:.4f}U / Target ${target:.2f}U)"
+    return False, ""
+
 # Variable Mode Logika & Lock Direction khusus Mode Inverted
 is_logic_inverted = False 
-_inverted_forced_side = None  # Menyimpan arah tunggal saat Mode INVERTED ("LONG" atau "SHORT")
+_inverted_forced_side = None
 
 # Variable Tracker Arah Eksekusi yang Terakhir Kali Mengalami Loss
 _last_failed_execution_side = None
@@ -750,13 +756,26 @@ def _rest_call(tag, fn, *args, retries=1, **kwargs):
     if last_exc is not None: raise last_exc
     raise RuntimeError(f"REST call failed: {tag}")
 
-get_precision = lambda sym: 2
+def get_precision(symbol: str) -> int:
+    if symbol in _precision_cache:
+        return _precision_cache[symbol]
+    try:
+        info = _rest_call(f"precision_{symbol}", client.futures_exchange_info)
+        for s in info["symbols"]:
+            if s["symbol"] == symbol:
+                prec = int(s["quantityPrecision"])
+                _precision_cache[symbol] = prec
+                return prec
+    except Exception:
+        pass
+    return 2
 
-def qty(symbol, price):
+def qty(symbol: str, price: float) -> float:
     raw = (ORDER_USDT * LEVERAGE) / price
-    return round(raw, get_precision(symbol))
+    p = get_precision(symbol)
+    return round(raw, p) if p > 0 else math.floor(raw)
 
-def price_live(symbol):
+def price_live(symbol: str) -> float:
     cached = _ws_mark_price.get(symbol)
     if cached:
         px, ts = cached
@@ -895,12 +914,16 @@ def ks_upd(pnl):
     _ks["daily"] += pnl
     _ks["consec"] = 0 if pnl >= 0 else _ks["consec"] + 1
 
+# ═══════════════════════════════════════════════════════════════════════════
+#  EXECUTION ENGINE (PAPER TRADING & LIVE SUPPORT)
+# ═══════════════════════════════════════════════════════════════════════════
+
 def live_open(orig_direction, score, sigs, price, atr, regime, bias, sym, risk_profile):
     global is_logic_inverted, _inverted_forced_side
 
-    # Guard Target Profit Mingguan: Cegah buka posisi baru jika target tercapai
-    target_reached, w_pnl, w_target = is_weekly_target_reached()
-    if target_reached:
+    # GUARD STRICT: Tolak pembukaan posisi jika Target Mingguan sudah tercapai
+    is_paused, _ = weekly_target_check()
+    if is_paused:
         return
 
     if orig_direction not in ("LONG", "SHORT"):
@@ -908,7 +931,7 @@ def live_open(orig_direction, score, sigs, price, atr, regime, bias, sym, risk_p
 
     # Penentuan Eksekusi Aktual
     if is_logic_inverted and _inverted_forced_side:
-        execution_side = _inverted_forced_side  # WAJIB mengunci pada arah tunggal
+        execution_side = _inverted_forced_side
     else:
         execution_side = orig_direction
 
@@ -918,8 +941,7 @@ def live_open(orig_direction, score, sigs, price, atr, regime, bias, sym, risk_p
         live_positions[sym] = {"_r": True}
 
     px_now = price_live(sym)
-    if px_now > 0:
-        price = px_now
+    if px_now > 0: price = px_now
 
     try:
         q_val = qty(sym, price)
@@ -929,11 +951,42 @@ def live_open(orig_direction, score, sigs, price, atr, regime, bias, sym, risk_p
         with _lock: live_positions.pop(sym, None)
         return
 
-    risk = DynamicRiskManager.calculate_levels(price, execution_side, atr)
+    order_id = "PAPER_" + str(int(time.time() * 1000))
 
+    if not IS_PAPER_TRADING:
+        # 1. Set Leverage
+        try:
+            _rest_call(f"set_leverage_{sym}", client.futures_change_leverage, symbol=sym, leverage=LEVERAGE)
+        except Exception as e:
+            _log_err(f"set_leverage_{sym}", e)
+
+        order_side = "BUY" if execution_side == "LONG" else "SELL"
+
+        # 2. Eksekusi Market Order ke Binance API Real
+        try:
+            order_res = _rest_call(
+                f"open_order_{sym}",
+                client.futures_create_order,
+                symbol=sym,
+                side=order_side,
+                type="MARKET",
+                quantity=q_val
+            )
+            
+            avg_price = float(order_res.get("avgPrice", 0.0))
+            if avg_price > 0:
+                price = avg_price
+            order_id = order_res.get("orderId")
+        except Exception as e:
+            print(f"  ❌ [API ORDER ERROR] Gagal Membuka Posisi {execution_side} pada {sym}: {e}")
+            with _lock: live_positions.pop(sym, None)
+            return
+
+    risk = DynamicRiskManager.calculate_levels(price, execution_side, atr)
     open_ts = time.time()
     entry_mode = "INVERTED" if is_logic_inverted else "NORMAL"
-    
+    acc_label = "PAPER TRADING" if IS_PAPER_TRADING else ("TESTNET DEMO" if USE_DEMO_ACCOUNT else "REAL MAINNET")
+
     pos = {
         "side": execution_side,
         "orig_signal": orig_direction,
@@ -951,17 +1004,16 @@ def live_open(orig_direction, score, sigs, price, atr, regime, bias, sym, risk_p
         "tp_price": risk["tp_price"],
         "sl_price": risk["sl_price"],
         "peak_price": price,
-        "paper": True,
         "mode": entry_mode,
+        "order_id": order_id,
     }
 
     with _lock:
         live_positions[sym] = pos
 
     d = "🟢" if execution_side == "LONG" else "🔴"
-
     print(
-        f"\n  {d} [PAPER TRADE] {sym} EXEC:{execution_side} (Signal:{orig_direction} | Mode:{entry_mode}) @{price:.6g} | "
+        f"\n  {d} [ORDER EXECUTED] [{acc_label}] {sym} EXEC:{execution_side} (Signal:{orig_direction} | Mode:{entry_mode}) @{price:.6g} | "
         f"QTY:{q_val:.8g} | TP:{risk['tp_pct']*100:.2f}% | SL:{risk['sl_pct']*100:.2f}% | In:{pos['open_time_wita']} WITA"
     )
 
@@ -977,22 +1029,72 @@ def live_close(sym, reason, price=None):
     if pos is None or pos.get("_r"):
         return
 
+    side = pos["side"]
+    q_val = pos["qty"]
+    close_side = "SELL" if side == "LONG" else "BUY"
+
     if price is None or price <= 0:
         price = price_live(sym)
 
-    if price <= 0:
-        with _lock: live_positions[sym] = pos
-        return
-
-    side = pos["side"]
     entry = pos["entry"]
-    q_val = pos["qty"]
     entry_mode = pos.get("mode", "NORMAL")
+    pnl_synced = False
 
-    gross_pnl = (price - entry) * q_val if side == "LONG" else (entry - price) * q_val
-    fee_rate = 0.0005
-    total_fee = (entry * q_val + price * q_val) * fee_rate
-    pnl = gross_pnl - total_fee
+    if not IS_PAPER_TRADING:
+        # 1. Eksekusi Market Close Order ke Binance API Real
+        try:
+            close_res = _rest_call(
+                f"close_order_{sym}",
+                client.futures_create_order,
+                symbol=sym,
+                side=close_side,
+                type="MARKET",
+                quantity=q_val,
+                reduceOnly=True
+            )
+            avg_close_price = float(close_res.get("avgPrice", 0.0))
+            if avg_close_price > 0:
+                price = avg_close_price
+        except Exception as e:
+            print(f"  ❌ [API CLOSE ERROR] Gagal Tutup Posisi {side} pada {sym}: {e}")
+            with _lock: live_positions[sym] = pos
+            return
+
+        # 2. Synchronize PnL Langsung dari API Trades Binance
+        try:
+            time.sleep(0.3)
+            trades = _rest_call(
+                f"user_trades_{sym}",
+                client.futures_account_trades,
+                symbol=sym,
+                limit=10
+            )
+            if trades:
+                close_order_id = int(close_res.get("orderId", -1))
+                matching_trades = [t for t in trades if int(t.get("orderId", 0)) == close_order_id]
+                
+                if matching_trades:
+                    realized_pnl_sum = sum(float(t.get("realizedPnl", 0.0)) for t in matching_trades)
+                    fee_sum = sum(float(t.get("commission", 0.0)) for t in matching_trades)
+                    
+                    open_order_id = int(pos.get("order_id", -1))
+                    open_trades = [t for t in trades if int(t.get("orderId", 0)) == open_order_id]
+                    entry_fee_sum = sum(float(t.get("commission", 0.0)) for t in open_trades) if open_trades else (entry * q_val * 0.0004)
+
+                    pnl = realized_pnl_sum - fee_sum - entry_fee_sum
+                    pnl_synced = True
+        except Exception as e:
+            _log_err(f"sync_pnl_{sym}", e)
+
+    if not pnl_synced:
+        if side == "LONG":
+            gross_pnl = (price - entry) * q_val
+        else:
+            gross_pnl = (entry - price) * q_val
+
+        fee_entry = (entry * q_val) * 0.0004
+        fee_exit = (price * q_val) * 0.0004
+        pnl = gross_pnl - (fee_entry + fee_exit)
 
     pct = ((price - entry) / entry * 100) if side == "LONG" else ((entry - price) / entry * 100)
     close_ts = time.time()
@@ -1003,25 +1105,16 @@ def live_close(sym, reason, price=None):
     close_wita = datetime.fromtimestamp(close_ts, tz=WITA_TZ).strftime("%H:%M:%S")
     open_wita = pos.get("open_time_wita", datetime.fromtimestamp(pos["open_time"], tz=WITA_TZ).strftime("%H:%M:%S"))
 
-    # Update Akumulasi Profit Mingguan
-    check_weekly_reset()
-    _weekly_pnl += pnl
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    #  LOGIKA INVERTED DIRECTION LOCK & TOGGLE
-    # ═══════════════════════════════════════════════════════════════════════════
-    if not won:  # Loss (SL atau TIME_LIMIT pnl < 0)
+    if not won:
         _last_failed_execution_side = side
 
         if not is_logic_inverted:
-            # Dari NORMAL berpindah ke INVERTED
             is_logic_inverted = True
-            _inverted_forced_side = "SHORT" if side == "LONG" else "LONG" # Kunci ke arah berlawanan
+            _inverted_forced_side = "SHORT" if side == "LONG" else "LONG"
             print(f"  🔄 [MODE CHANGE] Posisi NORMAL {side} LOSS ({pnl:+.4f}U)! Pindah ke INVERTED — KUNCI arah eksekusi ke: {_inverted_forced_side}")
         else:
-            # Dari INVERTED rugi lagi -> Pindah kembali ke NORMAL
             is_logic_inverted = False
-            _inverted_forced_side = None # Reset kunci arah
+            _inverted_forced_side = None
             print(f"  🔄 [MODE CHANGE] Posisi INVERTED {side} LOSS ({pnl:+.4f}U)! Pindah ke NORMAL — Arah Bebas Sesuai Sinyal.")
     else:
         _last_failed_execution_side = None
@@ -1029,8 +1122,9 @@ def live_close(sym, reason, price=None):
         forced_str = f" (Locked:{_inverted_forced_side})" if _inverted_forced_side else ""
         print(f"  ✅ [LOGIC STABLE] Posisi {side} PROFIT ({pnl:+.4f}U)! Mode Tetap: {current_mode}{forced_str}")
 
+    acc_tag = "PAPER" if IS_PAPER_TRADING else "API"
     print(
-        f"  {e_icon} [PAPER EXIT] {sym} {side} CLOSE [{entry_mode}] — {reason} | "
+        f"  {e_icon} [{acc_tag} EXIT CLOSED] {sym} {side} CLOSE [{entry_mode}] — {reason} | "
         f"{entry:.6g}→{price:.6g} ({pct:+.3f}%) hold:{hold:.0f}s | PnL:{pnl:+.5f}U | Out:{close_wita} WITA"
     )
 
@@ -1044,6 +1138,7 @@ def live_close(sym, reason, price=None):
     learning.add_trade(trade)
 
     _stats["pnl"] += pnl
+    _weekly_pnl += pnl
     _stats["hist"].append(pnl)
 
     if _stats["pnl"] > _stats["ath_pnl"]:
@@ -1071,11 +1166,6 @@ def live_close(sym, reason, price=None):
         "mode": entry_mode,
     })
 
-    # Cek Notifikasi Pencapaian Target Mingguan
-    if _weekly_pnl >= float(ORDER_USDT):
-        print(f"\n  🎉 [WEEKLY TARGET ACHIEVED] Profit Mingguan ({_weekly_pnl:+.4f}U) telah mencapai/melebihi target ({ORDER_USDT:.1f}U)!")
-        print(f"  🛑 Bot OTOMATIS PAUSE Trading sampai hari Senin 00:00 WITA.")
-
     _hot_syms.appendleft(sym)
     _rescan_q.put(1)
     print_inline()
@@ -1098,7 +1188,6 @@ def monitor_positions():
             if px <= tp_px: live_close(sym, "TP", tp_px); continue
             if px >= sl_px: live_close(sym, "SL", sl_px); continue
 
-        # Time Limit Check
         if hold_time > MAX_HOLD_SECONDS:
             print(f"  ⏰ {sym}: MAX_HOLD_SECONDS terlampaui ({hold_time:.0f}s) — TIME_LIMIT close")
             live_close(sym, "TIME_LIMIT", px)
@@ -1110,11 +1199,6 @@ def monitor_positions():
 
 def scan_one(sym):
     try:
-        # Cek apakah target profit minggu ini sudah tercapai
-        target_reached, _, _ = is_weekly_target_reached()
-        if target_reached:
-            return None
-
         time.sleep(0.002)
         df = ohlcv(sym, Client.KLINE_INTERVAL_5MINUTE, 100)
         if df is None: return None
@@ -1145,10 +1229,9 @@ def scan_one(sym):
 
         # Penentuan Eksekusi Aktual
         if is_logic_inverted and _inverted_forced_side:
-            # Jika di Mode INVERTED, hanya terima koin yang sinyal aslinya berlawanan dengan arah terkunci
             opposite_needed = "LONG" if _inverted_forced_side == "SHORT" else "SHORT"
             if orig_direction != opposite_needed:
-                return None  # Abaikan koin ini karena sinyalnya tidak cocok dengan KUNCI Mode Inverted
+                return None
             execution_side = _inverted_forced_side
         else:
             execution_side = orig_direction
@@ -1162,7 +1245,7 @@ def scan_one(sym):
 
             if score < required_score or adx_val < 25.0 or not trend_aligned:
                 _stats["same_side_veto"] += 1
-                return None  # VETO
+                return None
 
         px_live = price_live(sym)
         if px_live == 0: return None
@@ -1216,8 +1299,9 @@ def print_inline():
     mode_str = "INVERTED" if is_logic_inverted else "NORMAL"
     forced_str = f"({_inverted_forced_side})" if _inverted_forced_side else ""
     failed_str = f"| SameSideLock:{_last_failed_execution_side}" if _last_failed_execution_side else ""
-    print(f"       ┌ [PAPER ENGINE v22.2 - MODE: {mode_str}{forced_str}] {n}T WR:{wr:.0f}% W:{_stats['wins']} L:{_stats['losses']} PnL:{pnl:+.4f}U {failed_str} | W_PnL:{_weekly_pnl:+.4f}/{ORDER_USDT:.1f}U")
-    print(f"       └ TP:{_stats['tp_exit']} SL:{_stats['hard_sl']} TIME_LIMIT:{_stats['time_limit_exit']} | VolVeto:{_stats['low_vol_veto']} | SameSideVeto:{_stats['same_side_veto']}")
+    acc_mode = "PAPER TRADING" if IS_PAPER_TRADING else ("DEMO TESTNET" if USE_DEMO_ACCOUNT else "REAL MAINNET")
+    print(f"        ┌ [ENGINE v23.0 ({acc_mode}) - MODE: {mode_str}{forced_str}] {n}T WR:{wr:.0f}% W:{_stats['wins']} L:{_stats['losses']} PnL:{pnl:+.4f}U {failed_str}")
+    print(f"        └ TP:{_stats['tp_exit']} SL:{_stats['hard_sl']} TIME_LIMIT:{_stats['time_limit_exit']} | VolVeto:{_stats['low_vol_veto']} | SameSideVeto:{_stats['same_side_veto']} | Weekly:{_weekly_pnl:+.4f}U/${ORDER_USDT:.2f}U")
 
 def print_full():
     n = _stats["wins"] + _stats["losses"]
@@ -1227,15 +1311,15 @@ def print_full():
     forced_str = f" [{_inverted_forced_side} ONLY]" if _inverted_forced_side else ""
     now_wita = datetime.now(tz=WITA_TZ).strftime("%H:%M:%S WITA")
     failed_str = f" [SAME-SIDE GUARD ACTIVE: {_last_failed_execution_side}]" if _last_failed_execution_side else ""
+    acc_mode = "PAPER TRADING" if IS_PAPER_TRADING else ("DEMO TESTNET" if USE_DEMO_ACCOUNT else "REAL MAINNET")
     
     print(f"\n  {'─'*72}")
-    print(f"    🔔 INSTITUTIONAL SCALPING DASHBOARD (MODE: {mode_str}{forced_str}){failed_str} [{now_wita}]")
+    print(f"    🔔 INSTITUTIONAL SCALPING DASHBOARD ({acc_mode} | MODE: {mode_str}{forced_str}){failed_str} [{now_wita}]")
     print(f"    🎯 {n}T WR:{wr:.0f}% W:{_stats['wins']} L:{_stats['losses']}")
-    print(f"    PnL Net:{pnl:+.5f}U | ATH PnL:{_stats['ath_pnl']:+.5f}U | Weekly PnL:{_weekly_pnl:+.5f}/{ORDER_USDT:.1f}U")
+    print(f"    PnL Net:{pnl:+.5f}U | Weekly PnL:{_weekly_pnl:+.5f}U / Target:${ORDER_USDT:.2f}U | ATH PnL:{_stats['ath_pnl']:+.5f}U")
     print(f"    🏆 Best Win:{_stats['best']:+.5f}U | 💥 Worst Loss:{_stats['worst']:+.5f}U")
     print(f"    📈 Exit: TP:{_stats['tp_exit']} | SL:{_stats['hard_sl']} | TimeLimit:{_stats['time_limit_exit']} | VolVeto:{_stats['low_vol_veto']} | SameSideVeto:{_stats['same_side_veto']}")
 
-    # RIWAYAT 5 KOIN/TOKEN TERAKHIR DENGAN LABEL MODE LOGIKA
     if trade_log:
         print(f"    {'─'*68}\n    📋 Last 5 Trades (Makassar / WITA Timezone):")
         for t in trade_log[-5:]:
@@ -1259,9 +1343,7 @@ def t_slot_filler(syms):
     while True:
         try:
             slots = MAX_POSITIONS - len(live_positions)
-            target_reached, _, _ = is_weekly_target_reached()
-
-            if slots <= 0 or ks_check()[0] or target_reached:
+            if slots <= 0 or ks_check()[0] or weekly_target_check()[0]:
                 time.sleep(SLOT_FILL_INT); continue
 
             now = time.time()
@@ -1295,9 +1377,7 @@ def t_rescan(syms):
             _rescan_q.get(timeout=5)
             time.sleep(0.05)
             slots = MAX_POSITIONS - len(live_positions)
-            target_reached, _, _ = is_weekly_target_reached()
-
-            if slots <= 0 or ks_check()[0] or target_reached: continue
+            if slots <= 0 or ks_check()[0] or weekly_target_check()[0]: continue
 
             valid_syms = [s for s in syms if s not in live_positions]
             hot = [s for s in _hot_syms if s in valid_syms]
@@ -1383,25 +1463,27 @@ def handle_depth_multiplex(msg):
         if isinstance(data, dict) and data.get("s"):
             order_book.update(data["s"], data.get("b", []), data.get("a", []))
     except Exception as e:
-        _log_err("handle_depth_multiplex", e)
+        _log_err(f"handle_depth_multiplex", e)
 
 def run_bot():
+    acc_type_str = "PAPER TRADING (SIMULASI)" if IS_PAPER_TRADING else ("BINANCE FUTURES DEMO (TESTNET)" if USE_DEMO_ACCOUNT else "BINANCE FUTURES REAL MAINNET")
     print("╔════════════════════════════════════════════════════════════════════╗")
-    print("║  💎 BOT SCALPING v22.2 LIVE — INVERTED DIRECTION LOCK ENGINE        ║")
+    print(f"║  💎 BOT SCALPING v23.0 — EXECUTION ENGINE                         ║")
+    print(f"║  MODE AKUN: {acc_type_str:<51} ║")
     print("║  1. Mode Awal: NORMAL (Arah Bebas Sesuai Sinyal Indikator)         ║")
     print("║  2. Strict Filter: Volume Ratio >= 0.85 & ADX >= 20 (Anti-Sideway) ║")
-    print("║  3. Mode Inverted Lock:                                            ║")
+    print("║  3. Inverted Lock Engine:                                          ║")
     print("║     * Loss di NORMAL (LONG)  -> DIPAKSA SHORT SAMPAI LOSS          ║")
     print("║     * Loss di NORMAL (SHORT) -> DIPAKSA LONG SAMPAI LOSS           ║")
-    print(f"║  4. Margin = ${ORDER_USDT:.1f} | Target Profit Mingguan = ${ORDER_USDT:.1f}         ║")
-    print("║  5. Timestamp WITA (Makassar UTC+8) | Auto Reset Target: Senin    ║")
+    print(f"║  4. Target Profit Mingguan = ${ORDER_USDT:.2f} (Auto Pause & Reset Senin WITA)║")
+    print("║  5. Margin = $3.0 | Max Position = 1 | Timestamp WITA (Makassar)   ║")
     print("╚════════════════════════════════════════════════════════════════════╝")
     
     try:
         info = _rest_call("startup_exchange_info", client.futures_exchange_info, retries=0)
         valid = {s["symbol"] for s in info["symbols"] if s["status"] == "TRADING"}
     except Exception as e:
-        raise RuntimeError(f"Gagal membaca exchangeInfo: {e}")
+        raise RuntimeError(f"Gagal membaca exchangeInfo dari API Binance: {e}")
 
     syms = list(dict.fromkeys([s for s in SYMBOLS if s in valid]))
 
@@ -1419,11 +1501,18 @@ def run_bot():
         twm.start_futures_multiplex_socket(callback=handle_depth_multiplex, streams=depth_streams)
         time.sleep(0.15)
 
+    # ── STARTUP WARM-UP BUFFER (Fix Cold-Start Delay) ──────────────────────
+    print("  ⏳ Memulai Instant Warm-Up: Sinkronisasi data awal WebSocket...")
+    for s in syms[:BATCH_SIZE]:
+        _bootstrap_klines(s, Client.KLINE_INTERVAL_5MINUTE, 100)
+    time.sleep(2.5)
+
     threading.Thread(target=t_monitor, daemon=True).start()
     threading.Thread(target=t_slot_filler, args=(syms,), daemon=True).start()
     threading.Thread(target=t_rescan, args=(syms,), daemon=True).start()
     threading.Thread(target=t_macro, daemon=True).start()
-    time.sleep(2)
+
+    _rescan_q.put(1)
     
     cycle = 0
     while True:
@@ -1433,21 +1522,14 @@ def run_bot():
         forced_str = f" [{_inverted_forced_side} ONLY]" if _inverted_forced_side else ""
         now_wita = datetime.now(tz=WITA_TZ).strftime("%H:%M:%S")
         guard_status = f" | Guard:[{_last_failed_execution_side}]" if _last_failed_execution_side else ""
-        
-        target_reached, w_pnl, w_target = is_weekly_target_reached()
-
         print(f"\n{'═'*68}")
-        print(f"  #{cycle} {now_wita} WITA | BTC_5M:{_macro['btc']} Mode:[{mode_str}{forced_str}]{guard_status} ActivePos:({len(live_positions)}/{MAX_POSITIONS}) PnL:{_stats['pnl']:+.4f}U | WeeklyPnL:{w_pnl:+.4f}/{w_target:.1f}U")
+        print(f"  #{cycle} {now_wita} WITA | BTC_5M:{_macro['btc']} Mode:[{mode_str}{forced_str}]{guard_status} ActivePos:({len(live_positions)}/{MAX_POSITIONS}) PnL:{_stats['pnl']:+.4f}U | Weekly:{_weekly_pnl:+.4f}U/${ORDER_USDT:.2f}U")
 
-        if target_reached:
-            print(f"  🎯 WEEKLY TARGET REACHED ({w_pnl:+.4f}U >= {w_target:.1f}U) — PAUSE Trading Sampai Senin 00:00 WITA")
-        elif (k := ks_check())[0]:
-            print(f"  🚨 KS:{k[1]}")
-        elif slots == 0:
-            print(f"  ✅ Slots Full — Monitoring Posisi Terbuka")
-        else:
-            print(f"  🔍 Slot Kosong — Scanning Signal (Mode: {mode_str}{forced_str})...")
-
+        wk_target = weekly_target_check()
+        if wk_target[0]: print(f"  🎯 WEEKLY PAUSED: {wk_target[1]} — Menunggu Hari Senin untuk Reset OOT")
+        elif (k := ks_check())[0]: print(f"  🚨 KS:{k[1]}")
+        elif slots == 0: print(f"  ✅ Slots Full — Monitoring Posisi Terbuka")
+        else: print(f"  🔍 Slot Kosong — Scanning Signal ({'PAPER' if IS_PAPER_TRADING else 'LIVE API'} | Mode: {mode_str}{forced_str})...")
         if cycle % 30 == 0: print_full()
         time.sleep(SCAN_INTERVAL)
 
